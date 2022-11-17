@@ -1,7 +1,9 @@
 package gol
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/rpc"
 	"strconv"
 	"uk.ac.bris.cs/gameoflife/stubs"
@@ -17,9 +19,50 @@ type distributorChannels struct {
 	ioInput    <-chan uint8
 }
 
+func handleEvent(conn *net.Conn, e chan<- Event) {
+	fmt.Println("handling connection")
+	reader := bufio.NewReader(*conn)
+	for {
+		eventStr, _ := reader.ReadString('\n')
+		var event [4]int
+		fmt.Sscanf(eventStr, "%d,%d,%d,%d", &event[0], &event[1], &event[2], &event[3])
+
+		switch event[0] {
+		case 0: // AliveCellsCount
+			e <- AliveCellsCount{
+				CompletedTurns: event[1],
+				CellsCount:     event[2],
+			}
+		case 1: // CellFlipped
+			e <- CellFlipped{
+				CompletedTurns: event[1],
+				Cell: util.Cell{
+					X: event[2],
+					Y: event[3],
+				},
+			}
+		case 2: // TurnComplete
+			e <- TurnComplete{
+				CompletedTurns: event[1],
+			}
+		default:
+			return
+		}
+
+	}
+}
+
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
 	// TODO: Create a 2D slice to store the world.
+
+	listener, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer listener.Close()
+	addr := listener.Addr().String()
 
 	c.ioCommand <- ioInput
 	c.ioFilename <- strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight)
@@ -46,10 +89,18 @@ func distributor(p Params, c distributorChannels) {
 		Dim:     p.ImageWidth,
 		Turns:   p.Turns,
 		Threads: p.Threads,
+		Address: addr,
 	}
 	response := new(stubs.Response)
 
 	fmt.Println("connection made")
+
+	go func() {
+		fmt.Println("waiting to accept")
+		eventConn, _ := listener.Accept()
+		fmt.Println("accepted")
+		handleEvent(&eventConn, c.events)
+	}()
 
 	client.Call(stubs.GoL, request, response)
 
@@ -73,7 +124,7 @@ func distributor(p Params, c distributorChannels) {
 	}
 
 	c.ioCommand <- ioOutput
-	c.ioFilename <- strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight)
+	c.ioFilename <- strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight) + "x" + strconv.Itoa(p.Turns)
 
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {

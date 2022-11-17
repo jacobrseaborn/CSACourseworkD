@@ -33,6 +33,19 @@ func makeImmutableWorld(w [][]uint8) func(x, y int) uint8 {
 	}
 }
 
+func getAlive(world func(x, y int) uint8, dim int) int {
+	var total = 0
+	for y := 0; y < dim; y++ {
+		for x := 0; x < dim; x++ {
+			if world(x, y) == 255 {
+				total += 1
+			}
+		}
+	}
+	return total
+
+}
+
 func worker(world func(x, y int) uint8, sY, eY, sX, eX int, shared [][]uint8, dim int, wg *sync.WaitGroup) {
 	golLogic(world, shared, dim, dim, sY, eY, sX, eX)
 	wg.Done()
@@ -76,8 +89,20 @@ func golLogic(world func(x, y int) uint8, sharedWorld [][]uint8, height, width i
 
 type ServerOperation struct{}
 
+func SendEvent(conn *net.Conn, e []int) {
+	fmt.Println("event sent", e)
+	eventStr := fmt.Sprintf("%d,%d,%d,%d", e[0], e[1], e[2], e[3])
+	_, err := fmt.Fprintln(*conn, eventStr)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+}
+
 func (s *ServerOperation) GameOfLife(req stubs.Request, res *stubs.Response) (err error) {
 	fmt.Println("started engine")
+
+	conn, _ := net.Dial("tcp", req.Address)
 
 	immutableWorld := makeImmutableWorld(req.World)
 
@@ -91,19 +116,39 @@ func (s *ServerOperation) GameOfLife(req stubs.Request, res *stubs.Response) (er
 	}
 
 	wg := &sync.WaitGroup{}
-	//remainder := int(math.Mod(float64(p.ImageHeight), float64(p.Threads)))
+
+	exit := make(chan bool)
+	ticker := time.NewTicker(2 * time.Second)
+	completedTurns := 0
+
+	go func() {
+		for {
+
+			select {
+			case <-exit:
+				return
+			case <-ticker.C:
+				count := getAlive(immutableWorld, req.Dim)
+				turns := completedTurns + 1
+
+				SendEvent(&conn, []int{0, turns, count, 0}) // send event AliveCellsCount with CompletedTurns: turns and CellCount: count
+			}
+		}
+	}()
 
 	for turn := 0; turn < turns; turn++ {
 		wg.Add(threads)
 
 		for w := 0; w < threads-1; w++ {
-			go worker(immutableWorld, w*(h/threads), (w+1)*(h/threads), 0, w, sharedWorld, w, wg)
+			go worker(immutableWorld, w*(h/threads), (w+1)*(h/threads), 0, req.Dim, sharedWorld, req.Dim, wg)
 		}
 		go worker(immutableWorld, (threads-1)*(h/threads), h, 0, w, sharedWorld, w, wg)
 
 		// block here until done
 		wg.Wait()
 		immutableWorld = makeImmutableWorld(sharedWorld)
+		completedTurns = turn
+		SendEvent(&conn, []int{2, turn + 1, 0, 0})
 	}
 
 	if turns == 0 {
@@ -111,6 +156,12 @@ func (s *ServerOperation) GameOfLife(req stubs.Request, res *stubs.Response) (er
 	}
 
 	fmt.Println("finished engine")
+	ticker.Stop()
+	exit <- true
+
+	SendEvent(&conn, []int{3, 0, 0, 0})
+	conn.Close()
+
 	res.World = sharedWorld
 	return
 }
@@ -120,7 +171,13 @@ func main() {
 	flag.Parse()
 	rand.Seed(time.Now().UnixNano())
 	rpc.Register(&ServerOperation{})
-	listener, _ := net.Listen("tcp", ":"+*pAddr)
+	listener, err := net.Listen("tcp", ":"+*pAddr)
+
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	defer listener.Close()
 	rpc.Accept(listener)
 }

@@ -11,4 +11,5 @@ type Request struct {
 	Dim     int
 	Turns   int
 	Threads int
+	Address string
 }
