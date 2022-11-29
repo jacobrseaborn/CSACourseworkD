@@ -32,12 +32,13 @@ var serverPauseWg = new(sync.WaitGroup)
 
 // ========================================= HELPER FUNCTIONS ==========================================
 
+// deepCopy copies the 2d list element by element to prevent 2 lists pointing to the same space in memory
 func deepCopy(w [][]uint8) [][]uint8 {
 	l := len(w)
 
 	c := make([][]uint8, l)
 	for i := 0; i < l; i++ {
-		c[i] = make([]uint8, l)
+		c[i] = make([]uint8, l) // deep copies square worlds only
 	}
 
 	for y := 0; y < l; y++ {
@@ -48,6 +49,7 @@ func deepCopy(w [][]uint8) [][]uint8 {
 	return c
 }
 
+// getAlive calculates the number of alive cells in a given world
 func getAlive(world [][]uint8, dim int) int {
 	var total = 0
 	for y := 0; y < dim; y++ {
@@ -60,6 +62,8 @@ func getAlive(world [][]uint8, dim int) int {
 	return total
 
 }
+
+// GetAlive rpc endpoint for AliveCellsCount events
 func (b *Broker) GetAlive(req *stubs.AliveCellsCountRequest, res *stubs.AliveCellsCount) (err error) {
 	res.Turn = turn
 	res.Count = getAlive(world, len(world))
@@ -78,38 +82,41 @@ func (b *Broker) KillBroker(req stubs.Request, res *stubs.StatusReport) (err err
 	return
 }
 
+// reset is called when resetting the broker (if a new task is published etc.)
 func reset(kill bool) (err error) {
 	fmt.Println("Resetting!")
 
+	// unpause all servers if paused
 	if paused {
 		pause(false)
 		fmt.Println("unpaused all paused servers")
 	}
 
-	fmt.Println("passed pause")
-
+	// empty all worker channels
 	for w := 0; w < numWorkers; w++ {
 		for len(workers[w]) > 0 {
 			<-workers[w]
 		}
 		fmt.Println("Emptied work for worker", w)
 
+		// if killing server - add empty job to unblock subscriber_loop
 		if kill {
 			workers[w] <- stubs.Job{} // add work to flush subscriber_loop through
 		}
 	}
 
+	// unpause
 	pausedMutex = new(sync.Mutex)
 	paused = false
 
-	turn = 0
-	interrupt = true
+	turn = 0         // re-initalise turn
+	interrupt = true // interrupt interrupts the loop adding work in publish. Stops more work being added
 	if kill {
-		running = false
+		running = false // exit all subscriber loops. Effectively closing workers
 	}
 
 	if kill {
-		workerCount.Wait()
+		workerCount.Wait() // wait until all servers are shutdown
 		fmt.Println("All servers shutdown. Returning publish!")
 
 		for !closing {
@@ -125,24 +132,18 @@ func reset(kill bool) (err error) {
 }
 
 func pause(pausing bool) (err error) {
-	serverPauseWg.Wait()
-	serverPauseWg.Add(numWorkers)
-
-	if !paused && pausing {
-		pausedMutex.Lock()
+	if !paused && pausing { // if running and pausing
+		pausedMutex.Lock() // prevent processing
 		paused = true
 	} else if paused && !pausing {
 		pausedMutex.Unlock()
 		paused = false
 	}
-
-	//serverPauseWg.Add(numWorkers)
 	for w := 0; w < numWorkers; w++ {
-		err := clients[w].Call(stubs.PauseServer, stubs.PauseRequest{NewState: pausing}, new(stubs.PausedCallback))
+		err := clients[w].Call(stubs.PauseServer, stubs.PauseRequest{NewState: pausing}, new(stubs.PausedCallback)) // make rpc calls to pause processing on each individual server
 		if err != nil {
 			fmt.Println("Server had issue pausing.", err.Error())
 		}
-		serverPauseWg.Done()
 	}
 	return err
 }
@@ -150,26 +151,26 @@ func pause(pausing bool) (err error) {
 // ========================================= SUBSCRIBE & PUBLISH ============================================
 
 func subscribe(addr string, callback string) (err error) {
-	client, _ := rpc.Dial("tcp", addr)
-	work := make(chan stubs.Job, 100)
-	workers[numWorkers] = work
+	client, _ := rpc.Dial("tcp", addr) // dial into server
+	work := make(chan stubs.Job, 100)  // channel for jobs
+	workers[numWorkers] = work         // add work channel to global list
 	clients[numWorkers] = client
 	numWorkers++
 	workerCount.Add(1)
-	go subscriber_loop(client, work, callback)
+	go subscriber_loop(client, work, callback) // start looping to process jobs
 
 	return
 }
 
 func subscriber_loop(client *rpc.Client, work chan stubs.Job, callback string) {
 	for running {
-		job := <-work
+		job := <-work // take next job from work channel
 		if job.World == nil {
 			break
 		}
 
 		response := new(stubs.Response)
-		err := client.Call(callback, job, response)
+		err := client.Call(callback, job, response) // call GameOfLife method on server
 		if err != nil {
 			fmt.Println("Error: ", err.Error())
 			work <- job
@@ -178,10 +179,10 @@ func subscriber_loop(client *rpc.Client, work chan stubs.Job, callback string) {
 		}
 
 		// return
-		updateWorld(response.World, job.S)
-		wg.Done()
+		updateWorld(response.World, job.S) // update global world with slice
+		wg.Done()                          // mark work done for the turn
 	}
-	client.Call(stubs.KillServer, stubs.ResetRequest{Kill: true}, new(stubs.StatusReport))
+	client.Call(stubs.KillServer, stubs.ResetRequest{Kill: true}, new(stubs.StatusReport)) // once exiting subscriber_loop, call KillServer on this server
 	workerCount.Done()
 }
 
