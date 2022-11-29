@@ -19,29 +19,14 @@ type distributorChannels struct {
 	ioInput    <-chan uint8
 }
 
-func deepCopy(w [][]uint8) [][]uint8 {
-	l := len(w)
-
-	iW := make([][]uint8, l)
-	for i := 0; i < l; i++ {
-		iW[i] = make([]uint8, l)
-	}
-
-	for y := 0; y < l; y++ {
-		for x := 0; x < l; x++ {
-			iW[y][x] = w[y][x]
-		}
-	}
-	return iW
-}
-
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
-	// TODO: Create a 2D slice to store the world.
+	//Create a 2D slice to store the world.
 
 	c.ioCommand <- ioInput
 	c.ioFilename <- strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight)
 
+	// read from file to create initial world
 	world := make([][]uint8, p.ImageHeight)
 	for i := 0; i < p.ImageHeight; i++ {
 		world[i] = make([]uint8, p.ImageWidth)
@@ -50,11 +35,11 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}
 
+	// ensure input is finished before continuing
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
-	// TODO: Start workers and piece together GoL
-
+	// dial broker
 	broker := "127.0.0.1:8030"
 	client, _ := rpc.Dial("tcp", broker)
 	defer func(client *rpc.Client) {
@@ -65,6 +50,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}(client)
 
+	// formulate request for broker (initial world, number of turns, number of workers/threads)
 	request := stubs.PublishRequest{
 		World:   world,
 		Turns:   p.Turns,
@@ -72,16 +58,24 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	}
 	response := new(stubs.Response)
 
+	// since non-blocking rpc call. We need a done channel
 	done := make(chan *rpc.Call, 100)
 	running := true
-
-	ticker := time.NewTicker(2 * time.Second)
-	paused := false
 	closing := false
 
+	// ticker ticks every 2 seconds to prompt AliveCells event
+	ticker := time.NewTicker(2 * time.Second)
+	paused := false
+
+	// sharedWorld and turns complete for sending the final state of the board
+	var sharedWorld [][]uint8
+	turnsComplete := 0
+
+	// make non-blocking rpc to broker, publishing work.
 	client.Go(stubs.Publish, request, response, done)
 	for running {
 		select {
+		// ticker ticks
 		case <-ticker.C:
 			if !paused {
 				aliveCells := new(stubs.AliveCellsCount)
@@ -97,11 +91,17 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 					CompletedTurns: aliveCells.Turn,
 				}
 			}
+		// a key is pressed
 		case key := <-keyPresses:
 			switch key {
+			// 'p' pressed. Pause processing
 			case 'p':
 				callback := new(stubs.PausedCallback)
-				client.Call(stubs.Pause, stubs.PauseRequest{Paused: paused}, callback)
+				err := client.Call(stubs.PauseBroker, stubs.PauseRequest{NewState: !paused}, callback)
+				if err != nil {
+					fmt.Println(err.Error())
+					return
+				}
 				paused = callback.Paused
 
 				if paused {
@@ -116,12 +116,33 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 						NewState:       Executing,
 					}
 				}
+			// 'k' or 'q' pressed. Shutdown different components of the system depending.
 			case 'k', 'q':
-				fmt.Println("Key pressed: Quit and shutdown nodes")
-				client.Call(stubs.KillServer, stubs.KillCallback{}, new(stubs.KillCallback))
+				fmt.Println("Key pressed: Quit and shutdown nodes.", key)
+				ticker.Stop()
+
+				res := new(stubs.Response)
+				err := client.Call(stubs.RetrieveWorld, stubs.Request{}, res)
+				if err != nil {
+					fmt.Println(err.Error())
+					return
+				}
+				sharedWorld = res.World
+				turnsComplete = res.Turn
+
+				fmt.Println("about to kill")
 				if key == 'k' {
 					closing = true
 				}
+
+				response := new(stubs.StatusReport)
+				err = client.Call(stubs.Reset, stubs.ResetRequest{Kill: key == 'k'}, response)
+				if err != nil {
+					fmt.Println("panic: ", err.Error())
+					return
+				}
+				running = false
+			// 's' pressed. Save the current state of the board as a pgm.
 			case 's':
 				fmt.Println("Key pressed: Save pgm")
 
@@ -145,22 +166,28 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 					Filename:       filename,
 				}
 			}
+		// non-blocking rpc call is complete. Exit processing loop
 		case <-done:
+			ticker.Stop()
+
+			res := new(stubs.Response)
+			client.Call(stubs.RetrieveWorld, stubs.Request{}, res)
+			sharedWorld = res.World
+			turnsComplete = res.Turn
+
+			client.Call(stubs.Reset, stubs.ResetRequest{Kill: false}, new(stubs.StatusReport))
+
 			running = false
 		}
 	}
 
-	ticker.Stop()
-	res := new(stubs.Response)
-	client.Call(stubs.RetrieveWorld, stubs.Request{}, res)
-	sharedWorld := res.World
-
+	// Report the final state using FinalTurnCompleteEvent.
+	fmt.Println("Outside main loop")
 	if closing {
-		client.Call(stubs.CloseServer, stubs.Request{}, new(stubs.Response))
+		client.Call(stubs.KillBroker, stubs.Request{}, new(stubs.StatusReport))
 	}
 
-	// TODO: Report the final state using FinalTurnCompleteEvent.
-
+	// get a list of all the alive cells in final state
 	var alive []util.Cell
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
@@ -172,12 +199,13 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// send all events
 	c.events <- FinalTurnComplete{
-		CompletedTurns: p.Turns,
+		CompletedTurns: turnsComplete,
 		Alive:          alive,
 	}
 
+	// output final result as pgm image
 	c.ioCommand <- ioOutput
-	filename := strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight) + "x" + strconv.Itoa(p.Turns)
+	filename := strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight) + "x" + strconv.Itoa(turnsComplete)
 	c.ioFilename <- filename
 
 	for y := 0; y < p.ImageHeight; y++ {
@@ -190,11 +218,11 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 	c.events <- ImageOutputComplete{
-		CompletedTurns: res.Turn,
+		CompletedTurns: turnsComplete,
 		Filename:       filename,
 	}
 
-	c.events <- StateChange{p.Turns, Quitting}
+	c.events <- StateChange{turnsComplete, Quitting}
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	close(c.events)
 }

@@ -1,15 +1,21 @@
 package stubs
 
 var GoL = "ServerOperation.GameOfLife"
-var Pause = "ServerOperation.Pause"
+var PauseServer = "ServerOperation.Pause"
 var KillServer = "ServerOperation.KillServer"
 var CloseServer = "ServerOperation.CloseServer"
 
+var PauseBroker = "Broker.Pause"
 var RetrieveWorld = "Broker.RetrieveWorld"
 var GetAlive = "Broker.GetAlive"
 var Publish = "Broker.Publish"
 var Subscribe = "Broker.Subscribe"
-var InitBroker = "Broker.Init"
+var Reset = "Broker.Reset"
+var KillBroker = "Broker.KillBroker"
+
+type ResetRequest struct {
+	Kill bool
+}
 
 type BrokerRequest struct {
 	Threads int
@@ -52,8 +58,9 @@ type AliveCellsCount struct {
 	Count int
 }
 
+// PauseRequest NewState True for paused, false for unpaused
 type PauseRequest struct {
-	Paused bool
+	NewState bool
 }
 
 type PausedCallback struct {

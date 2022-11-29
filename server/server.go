@@ -18,7 +18,8 @@ var world func(x, y int) uint8
 var returnWorld [][]uint8
 var dim int
 var turn int
-var pause *sync.Mutex
+
+var pause *sync.WaitGroup
 var paused bool = false
 
 func deepCopy(w [][]uint8) [][]uint8 {
@@ -56,6 +57,8 @@ func golLogic(world func(x, y int) uint8, worldSlice [][]uint8, height, width in
 
 	for y := sY; y < eY; y++ {
 		for x := sX; x < eX; x++ {
+			pause.Wait()
+
 			sum := world(int(math.Mod(float64(x+width-1), float64(width))), int(math.Mod(float64(y+height-1), float64(height))))/255 +
 				world(int(math.Mod(float64(x+width), float64(width))), int(math.Mod(float64(y+height-1), float64(height))))/255 +
 				world(int(math.Mod(float64(x+width+1), float64(width))), int(math.Mod(float64(y+height-1), float64(height))))/255 +
@@ -90,21 +93,14 @@ func golLogic(world func(x, y int) uint8, worldSlice [][]uint8, height, width in
 
 type ServerOperation struct{}
 
-func (s *ServerOperation) KillServer(nil, res *stubs.KillCallback) (err error) {
-	turn = -2
-	if paused {
-		pause.Unlock()
-		paused = false
-	}
-	return
-}
-
-func (s *ServerOperation) CloseServer(req stubs.Response, res *stubs.Response) (err error) {
+func (s *ServerOperation) KillServer(req stubs.ResetRequest, res *stubs.StatusReport) (err error) {
+	fmt.Println("Server Killed!")
 	os.Exit(0)
 	return
 }
 
 func (s *ServerOperation) GameOfLife(req stubs.Job, res *stubs.Response) (err error) {
+	pause = new(sync.WaitGroup)
 	immutableWorld := makeImmutableWorld(req.World)
 	//returnWorld = req.World
 	world = immutableWorld
@@ -124,6 +120,21 @@ func (s *ServerOperation) GameOfLife(req stubs.Job, res *stubs.Response) (err er
 
 	res.World = deepCopy(worldSlice)
 	res.Turn = 0 // TODO
+	return
+}
+
+func (s *ServerOperation) Pause(req stubs.PauseRequest, res *stubs.PausedCallback) (err error) {
+	if req.NewState && !paused {
+		fmt.Println("Pausing Server")
+		pause.Add(1)
+		paused = true
+	} else if !req.NewState && paused {
+		fmt.Println("Unpaused Server")
+		pause.Done()
+		paused = false
+	}
+
+	res.Paused = req.NewState
 	return
 }
 
