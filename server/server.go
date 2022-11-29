@@ -7,51 +7,52 @@ import (
 	"math/rand"
 	"net"
 	"net/rpc"
+	"os"
 	"sync"
 	"time"
 	"uk.ac.bris.cs/gameoflife/stubs"
 )
 
 // GoL
+var world func(x, y int) uint8
+var returnWorld [][]uint8
+var dim int
+var turn int
+var pause *sync.Mutex
+var paused bool = false
 
-func makeImmutableWorld(w [][]uint8) func(x, y int) uint8 {
+func deepCopy(w [][]uint8) [][]uint8 {
 	l := len(w)
 
 	iW := make([][]uint8, l)
 	for i := 0; i < l; i++ {
-		iW[i] = make([]uint8, l)
+		iW[i] = make([]uint8, len(w[i]))
 	}
 
 	for y := 0; y < l; y++ {
-		for x := 0; x < l; x++ {
+		for x := 0; x < len(w[0]); x++ {
 			iW[y][x] = w[y][x]
 		}
 	}
+	return iW
+}
+
+func makeImmutableWorld(w [][]uint8) func(x, y int) uint8 {
+	iW := deepCopy(w)
 
 	return func(x, y int) uint8 {
 		return iW[y][x]
 	}
 }
 
-func getAlive(world func(x, y int) uint8, dim int) int {
-	var total = 0
-	for y := 0; y < dim; y++ {
-		for x := 0; x < dim; x++ {
-			if world(x, y) == 255 {
-				total += 1
-			}
-		}
-	}
-	return total
-
+func getOutboundIP() string {
+	conn, _ := net.Dial("udp", "8.8.8.8:80")
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr).IP.String()
+	return localAddr
 }
 
-func worker(world func(x, y int) uint8, sY, eY, sX, eX int, shared [][]uint8, dim int, wg *sync.WaitGroup) {
-	golLogic(world, shared, dim, dim, sY, eY, sX, eX)
-	wg.Done()
-}
-
-func golLogic(world func(x, y int) uint8, sharedWorld [][]uint8, height, width int, sY, eY, sX, eX int) {
+func golLogic(world func(x, y int) uint8, worldSlice [][]uint8, height, width int, sY, eY, sX, eX int) {
 
 	for y := sY; y < eY; y++ {
 		for x := sX; x < eX; x++ {
@@ -66,18 +67,18 @@ func golLogic(world func(x, y int) uint8, sharedWorld [][]uint8, height, width i
 
 			if world(x, y) == 255 { // this cell is alive
 				if sum == 2 || sum == 3 {
-					sharedWorld[y][x] = 255
+					worldSlice[y-sY][x] = 255
 				} else {
-					sharedWorld[y][x] = 0
+					worldSlice[y-sY][x] = 0
 					//fmt.Println("new world ", x, y, " flipped to dead. Turn:", turn)
 				}
 
 			} else { // this cell is dead
 				if sum == 3 {
-					sharedWorld[y][x] = 255
+					worldSlice[y-sY][x] = 255
 					//fmt.Println("new world ", x, y, " flipped to alive. Turn:", turn)
 				} else {
-					sharedWorld[y][x] = 0
+					worldSlice[y-sY][x] = 0
 				}
 
 			}
@@ -89,95 +90,81 @@ func golLogic(world func(x, y int) uint8, sharedWorld [][]uint8, height, width i
 
 type ServerOperation struct{}
 
-func SendEvent(conn *net.Conn, e []int) {
-	fmt.Println("event sent", e)
-	eventStr := fmt.Sprintf("%d,%d,%d,%d", e[0], e[1], e[2], e[3])
-	_, err := fmt.Fprintln(*conn, eventStr)
-	if err != nil {
-		fmt.Println(err)
-		return
+func (s *ServerOperation) KillServer(nil, res *stubs.KillCallback) (err error) {
+	turn = -2
+	if paused {
+		pause.Unlock()
+		paused = false
 	}
+	return
 }
 
-func (s *ServerOperation) GameOfLife(req stubs.Request, res *stubs.Response) (err error) {
-	fmt.Println("started engine")
+func (s *ServerOperation) CloseServer(req stubs.Response, res *stubs.Response) (err error) {
+	os.Exit(0)
+	return
+}
 
-	conn, _ := net.Dial("tcp", req.Address)
-
+func (s *ServerOperation) GameOfLife(req stubs.Job, res *stubs.Response) (err error) {
 	immutableWorld := makeImmutableWorld(req.World)
+	//returnWorld = req.World
+	world = immutableWorld
+	dim = len(req.World)
 
-	h, w := req.Dim, req.Dim
-	turns := req.Turns
-	threads := req.Threads
+	h := req.E - req.S
+	w := dim
 
-	sharedWorld := make([][]uint8, h)
+	worldSlice := make([][]uint8, h)
 	for i := 0; i < h; i++ {
-		sharedWorld[i] = make([]uint8, w)
+		worldSlice[i] = make([]uint8, w)
 	}
 
-	wg := &sync.WaitGroup{}
+	golLogic(world, worldSlice, dim, dim, req.S, req.E, 0, w)
+	//world = makeImmutableWorld(worldSlice)
+	//returnWorld = deepCopy(worldSlice)
 
-	exit := make(chan bool)
-	ticker := time.NewTicker(2 * time.Second)
-	completedTurns := 0
-
-	go func() {
-		for {
-
-			select {
-			case <-exit:
-				return
-			case <-ticker.C:
-				count := getAlive(immutableWorld, req.Dim)
-				turns := completedTurns + 1
-
-				SendEvent(&conn, []int{0, turns, count, 0}) // send event AliveCellsCount with CompletedTurns: turns and CellCount: count
-			}
-		}
-	}()
-
-	for turn := 0; turn < turns; turn++ {
-		wg.Add(threads)
-
-		for w := 0; w < threads-1; w++ {
-			go worker(immutableWorld, w*(h/threads), (w+1)*(h/threads), 0, req.Dim, sharedWorld, req.Dim, wg)
-		}
-		go worker(immutableWorld, (threads-1)*(h/threads), h, 0, w, sharedWorld, w, wg)
-
-		// block here until done
-		wg.Wait()
-		immutableWorld = makeImmutableWorld(sharedWorld)
-		completedTurns = turn
-		SendEvent(&conn, []int{2, turn + 1, 0, 0})
-	}
-
-	if turns == 0 {
-		sharedWorld = req.World
-	}
-
-	fmt.Println("finished engine")
-	ticker.Stop()
-	exit <- true
-
-	SendEvent(&conn, []int{3, 0, 0, 0})
-	conn.Close()
-
-	res.World = sharedWorld
+	res.World = deepCopy(worldSlice)
+	res.Turn = 0 // TODO
 	return
 }
 
 func main() {
-	pAddr := flag.String("port", "8030", "Port to listen on")
+	pAddr := flag.String("port", "8080", "Port to listen on")
 	flag.Parse()
 	rand.Seed(time.Now().UnixNano())
-	rpc.Register(&ServerOperation{})
+	err := rpc.Register(&ServerOperation{})
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
 	listener, err := net.Listen("tcp", ":"+*pAddr)
 
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println(err.Error())
 		return
 	}
 
-	defer listener.Close()
+	client, _ := rpc.Dial("tcp", "127.0.0.1:8030")
+
+	request := stubs.Subscription{
+		WorkerAddress: getOutboundIP() + ":" + *pAddr,
+		Callback:      "ServerOperation.GameOfLife",
+	}
+	response := new(stubs.StatusReport)
+
+	fmt.Println(request.WorkerAddress)
+
+	err = client.Call(stubs.Subscribe, request, response)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	defer func(listener net.Listener) {
+		err := listener.Close()
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+	}(listener)
 	rpc.Accept(listener)
 }
