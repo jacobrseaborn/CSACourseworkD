@@ -156,6 +156,7 @@ func main() {
 		return
 	}
 
+	fmt.Println(*pBrokerAddr)
 	client, _ := rpc.Dial("tcp", *pBrokerAddr)
 
 	request := stubs.Subscription{

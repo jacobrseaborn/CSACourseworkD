@@ -63,6 +63,14 @@ func getAlive(world [][]uint8, dim int) int {
 
 }
 
+// getOutboundIP returns the address of this broker.
+func getOutboundIP() string {
+	conn, _ := net.Dial("udp", "8.8.8.8:80")
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr).IP.String()
+	return localAddr
+}
+
 // GetAlive rpc endpoint for AliveCellsCount events. Called every 2 seconds by distributor
 func (b *Broker) GetAlive(nil, res *stubs.AliveCellsCount) (err error) {
 	res.Turn = turn
@@ -281,5 +289,8 @@ func main() {
 	rpc.Register(&Broker{})
 	listener, _ := net.Listen("tcp", ":"+*pAddr)
 	defer listener.Close()
+
+	fmt.Println(getOutboundIP())
+
 	rpc.Accept(listener)
 }
