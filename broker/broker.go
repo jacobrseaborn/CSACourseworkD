@@ -246,11 +246,13 @@ func publish(w [][]uint8, threads int, turns int) (err error) {
 type Broker struct{}
 
 func (b *Broker) Subscribe(req stubs.Subscription, res *stubs.StatusReport) (err error) {
+	fmt.Println("RCP worked!", req.WorkerAddress)
 	err = subscribe(req.WorkerAddress, req.Callback)
 	if err != nil {
 		fmt.Println("Error: ", err)
 		return err
 	}
+	fmt.Println("Added client:", req.WorkerAddress)
 	return err
 }
 

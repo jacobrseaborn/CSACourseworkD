@@ -156,8 +156,9 @@ func main() {
 		return
 	}
 
-	fmt.Println(*pBrokerAddr)
 	client, _ := rpc.Dial("tcp", *pBrokerAddr)
+
+	fmt.Println("Dialled.", *pBrokerAddr)
 
 	request := stubs.Subscription{
 		WorkerAddress: getOutboundIP() + ":" + *pAddr,
