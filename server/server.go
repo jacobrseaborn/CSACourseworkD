@@ -156,7 +156,11 @@ func main() {
 		return
 	}
 
-	client, _ := rpc.Dial("tcp", *pBrokerAddr)
+	client, err := rpc.Dial("tcp", *pBrokerAddr)
+	if err != nil {
+		fmt.Println("Error:", err.Error())
+		return
+	}
 
 	fmt.Println("Dialled.", *pBrokerAddr)
 
