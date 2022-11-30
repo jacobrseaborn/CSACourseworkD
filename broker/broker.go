@@ -63,13 +63,14 @@ func getAlive(world [][]uint8, dim int) int {
 
 }
 
-// GetAlive rpc endpoint for AliveCellsCount events
-func (b *Broker) GetAlive(req *stubs.AliveCellsCountRequest, res *stubs.AliveCellsCount) (err error) {
+// GetAlive rpc endpoint for AliveCellsCount events. Called every 2 seconds by distributor
+func (b *Broker) GetAlive(nil, res *stubs.AliveCellsCount) (err error) {
 	res.Turn = turn
 	res.Count = getAlive(world, len(world))
 	return
 }
 
+// RetrieveWorld used by distributor to retrieve a Response before the non-blocking rpc is complete.
 func (b *Broker) RetrieveWorld(nil, res *stubs.Response) (err error) {
 	res.World = deepCopy(world)
 	res.Turn = turn
@@ -77,7 +78,8 @@ func (b *Broker) RetrieveWorld(nil, res *stubs.Response) (err error) {
 	return
 }
 
-func (b *Broker) KillBroker(req stubs.Request, res *stubs.StatusReport) (err error) {
+// KillBroker called by Distributor when 'k' is pressed to shut down Broker.
+func (b *Broker) KillBroker(nil, res *stubs.StatusReport) (err error) {
 	defer os.Exit(0)
 	return
 }
@@ -125,9 +127,6 @@ func reset(kill bool) (err error) {
 		fmt.Println("Publish returned. Exiting broker")
 	}
 
-	fmt.Println("Work remaining (0,1,2): ", len(workers[0]), len(workers[1]), len(workers[2]))
-	fmt.Println("AliveCellCount: ", getAlive(world, len(world)), turn)
-
 	return
 }
 
@@ -135,14 +134,15 @@ func pause(pausing bool) (err error) {
 	if !paused && pausing { // if running and pausing
 		pausedMutex.Lock() // prevent processing
 		paused = true
-	} else if paused && !pausing {
-		pausedMutex.Unlock()
+	} else if paused && !pausing { // if paused and unpausing
+		pausedMutex.Unlock() // allow processing
 		paused = false
 	}
 	for w := 0; w < numWorkers; w++ {
+		// toggle each server as well
 		err := clients[w].Call(stubs.PauseServer, stubs.PauseRequest{NewState: pausing}, new(stubs.PausedCallback)) // make rpc calls to pause processing on each individual server
 		if err != nil {
-			fmt.Println("Server had issue pausing.", err.Error())
+			fmt.Println("Server had issue with (un)pausing.", err.Error())
 		}
 	}
 	return err
@@ -190,7 +190,7 @@ func updateWorld(w [][]uint8, startY int) {
 
 	for y := 0; y < len(w); y++ {
 		for x := 0; x < len(w[y]); x++ {
-			newWorld[y+startY][x] = w[y][x]
+			newWorld[y+startY][x] = w[y][x] // updates shared newWorld with individual slice returned by server
 		}
 	}
 }
@@ -205,9 +205,9 @@ func publish(w [][]uint8, threads int, turns int) (err error) {
 
 	if threads > numWorkers {
 		threads = numWorkers
+		fmt.Println("Capping number of threads to number of servers. Using", numWorkers, "servers (100%)")
 	}
 
-	fmt.Println("AliveCellCount: ", getAlive(world, len(world)), turn)
 	for t := 0; t < turns && !interrupt; t++ {
 		pausedMutex.Lock()
 		pausedMutex.Unlock()
@@ -223,10 +223,10 @@ func publish(w [][]uint8, threads int, turns int) (err error) {
 		workers[threads-1] <- stubs.Job{
 			World: world,
 			S:     (len(world) / threads) * (threads - 1),
-			E:     len(world),
+			E:     len(world), // if not to the power of 2. Give the last worker the remainder
 		}
 
-		wg.Wait()
+		wg.Wait() // wait for all servers to process one turn
 		turn++
 		world = deepCopy(newWorld)
 

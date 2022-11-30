@@ -79,7 +79,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		case <-ticker.C:
 			if !paused {
 				aliveCells := new(stubs.AliveCellsCount)
-				err := client.Call(stubs.GetAlive, new(stubs.AliveCellsCountRequest), aliveCells)
+				err := client.Call(stubs.GetAlive, stubs.Empty{}, aliveCells)
 
 				if err != nil {
 					fmt.Println(err.Error())
@@ -91,7 +91,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 					CompletedTurns: aliveCells.Turn,
 				}
 			}
-		// a key is pressed
+		// a key is pressed. Remove key from keyPresses channel
 		case key := <-keyPresses:
 			switch key {
 			// 'p' pressed. Pause processing
@@ -130,11 +130,11 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 				sharedWorld = res.World
 				turnsComplete = res.Turn
 
-				fmt.Println("about to kill")
 				if key == 'k' {
 					closing = true
 				}
 
+				// reset broker
 				response := new(stubs.StatusReport)
 				err = client.Call(stubs.Reset, stubs.ResetRequest{Kill: key == 'k'}, response)
 				if err != nil {

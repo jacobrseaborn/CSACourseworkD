@@ -3,7 +3,6 @@ package stubs
 var GoL = "ServerOperation.GameOfLife"
 var PauseServer = "ServerOperation.Pause"
 var KillServer = "ServerOperation.KillServer"
-var CloseServer = "ServerOperation.CloseServer"
 
 var PauseBroker = "Broker.Pause"
 var RetrieveWorld = "Broker.RetrieveWorld"
@@ -13,12 +12,13 @@ var Subscribe = "Broker.Subscribe"
 var Reset = "Broker.Reset"
 var KillBroker = "Broker.KillBroker"
 
-type ResetRequest struct {
-	Kill bool
-}
+// Empty request
+type Empty struct{}
 
-type BrokerRequest struct {
-	Threads int
+// ResetRequest is used when distributor resets broker. Contains 'kill' flag, if true then kill broker and all servers. Else keep running
+type ResetRequest struct {
+	// Kill flag. If 'true' then kill broker and all servers.
+	Kill bool
 }
 
 type Subscription struct {
@@ -51,8 +51,6 @@ type Job struct {
 	S, E  int
 }
 
-type AliveCellsCountRequest struct{}
-
 type AliveCellsCount struct {
 	Turn  int
 	Count int
@@ -67,5 +65,3 @@ type PausedCallback struct {
 	Paused bool
 	Turn   int
 }
-
-type KillCallback struct{}

@@ -20,7 +20,7 @@ var dim int
 var turn int
 
 var pause *sync.WaitGroup
-var paused bool = false
+var paused = false
 
 func deepCopy(w [][]uint8) [][]uint8 {
 	l := len(w)
@@ -46,6 +46,7 @@ func makeImmutableWorld(w [][]uint8) func(x, y int) uint8 {
 	}
 }
 
+// getOutboundIP returns the address of this server.
 func getOutboundIP() string {
 	conn, _ := net.Dial("udp", "8.8.8.8:80")
 	defer conn.Close()
@@ -53,6 +54,7 @@ func getOutboundIP() string {
 	return localAddr
 }
 
+// golLogic contains the Game of Life logic, process the world for one iteration for the given constraints.
 func golLogic(world func(x, y int) uint8, worldSlice [][]uint8, height, width int, sY, eY, sX, eX int) {
 
 	for y := sY; y < eY; y++ {
@@ -73,13 +75,11 @@ func golLogic(world func(x, y int) uint8, worldSlice [][]uint8, height, width in
 					worldSlice[y-sY][x] = 255
 				} else {
 					worldSlice[y-sY][x] = 0
-					//fmt.Println("new world ", x, y, " flipped to dead. Turn:", turn)
 				}
 
 			} else { // this cell is dead
 				if sum == 3 {
 					worldSlice[y-sY][x] = 255
-					//fmt.Println("new world ", x, y, " flipped to alive. Turn:", turn)
 				} else {
 					worldSlice[y-sY][x] = 0
 				}
@@ -93,16 +93,18 @@ func golLogic(world func(x, y int) uint8, worldSlice [][]uint8, height, width in
 
 type ServerOperation struct{}
 
-func (s *ServerOperation) KillServer(req stubs.ResetRequest, res *stubs.StatusReport) (err error) {
+func (s *ServerOperation) KillServer(req stubs.Empty, res *stubs.StatusReport) (err error) {
 	fmt.Println("Server Killed!")
+	res.Message = "Server Killed!"
 	os.Exit(0)
 	return
 }
 
+// GameOfLife is the callback method for the broker. Receives Jobs and fulfils them.
 func (s *ServerOperation) GameOfLife(req stubs.Job, res *stubs.Response) (err error) {
 	pause = new(sync.WaitGroup)
 	immutableWorld := makeImmutableWorld(req.World)
-	//returnWorld = req.World
+
 	world = immutableWorld
 	dim = len(req.World)
 
@@ -115,14 +117,13 @@ func (s *ServerOperation) GameOfLife(req stubs.Job, res *stubs.Response) (err er
 	}
 
 	golLogic(world, worldSlice, dim, dim, req.S, req.E, 0, w)
-	//world = makeImmutableWorld(worldSlice)
-	//returnWorld = deepCopy(worldSlice)
 
 	res.World = deepCopy(worldSlice)
 	res.Turn = 0 // TODO
 	return
 }
 
+// Pause handles pausing the individual server
 func (s *ServerOperation) Pause(req stubs.PauseRequest, res *stubs.PausedCallback) (err error) {
 	if req.NewState && !paused {
 		fmt.Println("Pausing Server")
@@ -139,6 +140,7 @@ func (s *ServerOperation) Pause(req stubs.PauseRequest, res *stubs.PausedCallbac
 }
 
 func main() {
+	pBrokerAddr := flag.String("broker", "127.0.0.1:8030", "Address of broker to dial into")
 	pAddr := flag.String("port", "8080", "Port to listen on")
 	flag.Parse()
 	rand.Seed(time.Now().UnixNano())
@@ -154,11 +156,11 @@ func main() {
 		return
 	}
 
-	client, _ := rpc.Dial("tcp", "127.0.0.1:8030")
+	client, _ := rpc.Dial("tcp", *pBrokerAddr)
 
 	request := stubs.Subscription{
 		WorkerAddress: getOutboundIP() + ":" + *pAddr,
-		Callback:      "ServerOperation.GameOfLife",
+		Callback:      stubs.GoL,
 	}
 	response := new(stubs.StatusReport)
 
