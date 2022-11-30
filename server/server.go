@@ -165,8 +165,6 @@ func main() {
 	}
 	response := new(stubs.StatusReport)
 
-	fmt.Println(request.WorkerAddress)
-
 	err = client.Call(stubs.Subscribe, request, response)
 	if err != nil {
 		fmt.Println(err.Error())
